@@ -1,4 +1,4 @@
-# Issue #2 - Preserved-Node Under-Stored Weight Audit
+# Issue #2 - Stuck-pw "0.35x" Audit (revised)
 
 Prepared by Mike @ GonkaLabs, for the Gonka Restitution Committee.
 
@@ -6,277 +6,266 @@ Task wording: *"MLNodes which were sampled as preserver nodes in epoch 247
 (and might be next epoch until first PoC) causes lowered weight for this
 node (0.35[%/x] of the full weight)."*
 
-Anchor epoch: 247, with extension to epoch 248 (see scope discussion below).
 Subgroup audited: `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8` (the only active
 multi-model subgroup at the time). Source of truth: public chain RPC at
-`http://node2.gonka.ai:8000/chain-api/...`. Every number in this report is
-regenerated end-to-end by `issue2_audit.py` (~30 s, stdlib-only).
+`http://node2.gonka.ai:8000/chain-api/...`. Every number here is regenerated
+end-to-end by `issue2_audit.py` (~30 s, stdlib-only).
+
+## Revision note
+
+An earlier version of this report mis-modeled the bug. It anchored the
+victim cohort on epoch 247 preservation and tried to detect the bug from
+the `anchor_pw / fresh_pw` ratio after a node ran fresh PoC. That worked for
+nodes that did re-PoC under v0.2.12 in epoch 249, but it missed every node
+that stayed preserved (or otherwise didn't re-PoC) under the new code -
+exactly the case the bug actually hurts. A GRC member flagged that their
+own address was not in the
+restitution list despite getting ~35% of normal rewards for three epochs in
+a row. They were right; the script's filter was wrong. This revision fixes
+the detection and recomputes everything.
+
+The numbers are smaller than the previous version, but they are the right
+numbers. The previous version over-counted by using `(1/WSF - 1) * pw` as
+the missing-weight numerator and the pre-upgrade total as the denominator.
+The correct expression is `(1 - WSF) * pw` divided by the post-upgrade
+total in the affected epoch.
 
 ## Headline
 
-The "0.35x" figure in the GRC task is exactly the Qwen `WeightScaleFactor`
-of **0.3593**.
+The "0.35x" figure is the Qwen `WeightScaleFactor` (WSF) of **0.3593**.
 
-When a node was preserved across the v0.2.12 upgrade boundary, its
-`MLNodeInfo.PocWeight` was carried over in pre-v0.2.12 storage units (i.e.
-already multiplied by `WeightScaleFactor`). The v0.2.12 multi-model PoC
-code re-interprets `MLNodeInfo.PocWeight` as raw nonces and applies
-`WeightScaleFactor` again at the consensus aggregation step. Net effect:
-nodes preserved across the upgrade contributed only ~36% of their true PoC
-capability to consensus weight, until they ran a fresh PoC under the new
-code (which for almost everyone happened in epoch 249).
+When a node carried its `MLNodeInfo.PocWeight` across the v0.2.12 upgrade
+without running fresh PoC under the new code, the chain re-interpreted the
+already-scaled pre-v0.2.12 value as if it were raw nonces and applied WSF
+again at consensus aggregation. From epoch 249 onward, that node's
+consensus contribution was `WSF * pw_stored` instead of the intended
+`pw_stored`. Every reward stream that depends on consensus weight (PoC
+fixed reward, inference settlement) shrinks proportionally - that is the
+"~36% of full reward" pattern operators reported in chat.
 
-We can confirm 12 MLNodes as Issue #2 victims using on-chain data alone:
-their `anchor_pw / fresh_pw` ratio sits in [0.319, 0.379], clustering
-tightly on `WeightScaleFactor`. Restitution for those 12 comes out to
-**12,907.19 GONKA**.
+After the corrected detection: **34 (participant, node) pairs** are clear
+victims. Total restitution comes to **10,701.39 GONKA** for the PoC fixed
+reward only. Inference settlement losses are real but out of scope for this
+script.
 
-A further 18 nodes were preserved in epoch 247 or 248 but never observed
-running a fresh PoC again within our 10-epoch scan window (typically
-because the participant left the subgroup or the box stopped reporting).
-Applying the same WSF heuristic to those nodes adds 29,390 GONKA, so the
-grand total comes to roughly **42,298 GONKA**.
+## 1. The bug, on chain
 
-## 1. The bug
-
-`MLNodeInfo.PocWeight` is the per-node weight contribution stored on chain.
-Pre-v0.2.12 (single-model PoC) the chain stored values in
-post-`WeightScaleFactor` units, i.e. `pocWeight = nonces * WeightScaleFactor`
-("scaled units"). The reward formula didn't apply `WeightScaleFactor` again
-because it was already baked in.
-
-Post-v0.2.12 (multi-model PoC, PR #948 + PR #1089) `MLNodeInfo.PocWeight`
-is stored in raw nonces ("raw units"). The chain applies
-`WeightScaleFactor` when computing each model subgroup's contribution to
-consensus weight.
-
-The v0.2.12 migration in
-`inference-chain/app/upgrades/v0_2_12/upgrades.go::clearLegacyPoCv2Data`
+Pre-v0.2.12 stored `MLNodeInfo.PocWeight` in already-scaled units
+(`raw_nonces * WeightScaleFactor`). Post-v0.2.12 stores it in raw nonces
+and applies `WeightScaleFactor` at the validation_weight step. The
+v0.2.12 migration in `inference-chain/app/upgrades/v0_2_12/upgrades.go`
 clears legacy PoC v2 collections but does not rewrite existing
-`MLNodeInfo.PocWeight` values that the preservation mechanism carried over.
-Preserved nodes therefore arrived in v0.2.12 holding scaled-unit values,
-and the new aggregation code interpreted those values as raw units. Their
-consensus contribution worked out to
-`WeightScaleFactor * stored_value = WeightScaleFactor * (true_value * WeightScaleFactor) ≈ 0.13 * true_value`.
-Compared to a freshly PoC'd node in the same epoch, their effective weight
-was off by a factor of `WeightScaleFactor` (about 0.36x).
+`MLNodeInfo.PocWeight` values, so any node that didn't run fresh PoC under
+v0.2.12 stayed with a stale, pre-scaled value.
 
-Concrete evidence sits in `output/issue2_per_node.csv`. The 12 observed
-victims all show `pw_ratio` in [0.319, 0.379]:
+The reward formula (from `inference-chain/x/inference/keeper/bitcoin_rewards.go`,
+v0.2.12) reads:
 
-| ratio | nodes | distance from WSF (0.3593) |
-|---:|---:|---:|
-| 0.319678 | 1 | -11.0% |
-| 0.342818 | 1 | -4.6% |
-| 0.343018 | 1 | -4.5% |
-| 0.350863 | 1 | -2.4% |
-| 0.352544 | 1 | -1.9% |
-| 0.353219 | 1 | -1.7% |
-| 0.354128 | 1 | -1.5% |
-| 0.355438 | 1 | -1.1% |
-| 0.356308 | 1 | -0.8% |
-| 0.361074 | 1 | +0.5% |
-| 0.363559 | 1 | +1.2% |
-| 0.379244 | 1 | +5.5% |
+```
+effectiveWeight = ConfirmationWeight                  (= WSF * sum(pw))
+totalFullWeight = sum_over_participants(sum(pw))
+reward          = effectiveWeight * fixedEpochReward / totalFullWeight
+```
 
-Mean 0.353, std 0.014 - all twelve land on `WeightScaleFactor`. Hard to
-read this as anything other than the bug.
+For a stuck node with `pw_stuck` (pre-scaled units), the chain treats this
+as raw and computes `effective = WSF * pw_stuck`. The intended consensus
+contribution would be `pw_stuck` (= `WSF * pw_raw` where `pw_raw = pw_stuck / WSF`).
+The per-epoch shortfall in the numerator is therefore `(1 - WSF) * pw_stuck`.
 
-## 2. Scope: epoch 247 vs 248
+You can see this directly on chain. Pick the GRC member's case
+(`gonka16k...`):
 
-The GRC anchored the task on epoch 247. If we anchor strictly on 247:
 
-- Primary cohort = 46 (participant, node) pairs preserved in epoch 247.
-- Of those, 4 nodes have hard observed evidence of the bug (fresh
-  follow-up in epoch 249+ with ratio < 0.5).
-- 10 are indeterminate (no observed fresh follow-up within the scan window).
-- 32 had ratio about 1.0, because their first fresh PoC happened in epoch
-  248 still under pre-v0.2.12 units, so there's no observable bias to
-  measure.
+| epoch | weight | conf    | sum_pw | conf/weight | nodes                                                              |
+| ----- | ------ | ------- | ------ | ----------- | ------------------------------------------------------------------ |
+| 246   | 2685   | 0       | 2685   | 0.000       | node1 pw=2685 (preserved, Issue #1)                                |
+| 247   | 2685   | 0       | 2685   | 0.000       | node1 pw=2685 (preserved, Issue #1)                                |
+| 248   | 2685   | 2685    | 2685   | 1.000       | node1 pw=2685 (last v0.2.11 reward formula, no WSF)                |
+| 249   | 2685   | **964** | 2685   | **0.359**   | node1 pw=2685 (v0.2.12 reward formula, WSF applied to stale value) |
+| 250   | 2685   | 964     | 2685   | 0.359       | same                                                               |
+| 251   | 13738  | 4936    | 13738  | 0.359       | node1 retired, node3+node4 fresh PoC under v0.2.12                 |
 
-Anchoring strictly on 247 misses most of the actual bug instances because
-epoch 248 is the upgrade epoch, and that's where the cleanest evidence
-sits. The task wording *"and might be next epoch until first PoC"* invites
-us to extend.
 
-The script's `--extended-cohort` flag adds nodes preserved in epoch 248 but
-not in epoch 247 (another 21 pairs, 8 of which are observed Issue #2
-victims). The two cohorts together (67 nodes) capture all 12 observed
-victims.
+`conf/weight = 0.359` in epochs 249-250 is the chain applying WSF
+universally. For node1, `weight = 2685` is the stale pre-scaled value,
+so `conf = 964 = 0.3593 * 2685`. The intended consensus contribution
+(if node1 had been re-measured in raw units, ~7475) would have been
+`WSF * 7475 = 2685`. Difference: `(1 - WSF) * 2685 ≈ 1720`.
 
-Recommendation: include both cohorts. The bug mechanism is identical, the
-only reason 248 looks "worse" is timing - more nodes' first fresh PoC
-under v0.2.12 code happened in epoch 249.
+Same pattern verified across every node in Cohort B below.
+
+## 2. Detection (Cohort B)
+
+Anchor: epoch 248, the last snapshot under v0.2.11 storage convention.
+For every (participant, node) seen at epoch 248 we walk epochs 249..253:
+
+- **Stuck epoch**: `pw_E / pw_baseline` in `[0.95, 1.10]` - the value
+didn't move, so the node didn't re-PoC under v0.2.12.
+- **Fix epoch**: `pw_E / pw_baseline >= 2.0` - the node re-PoC'd under
+v0.2.12 in raw units (typical jump is ~1/WSF ≈ 2.78x). We stop counting
+stuck epochs at this point.
+
+Anything in `(1.10, 2.0)` is ambiguous (8 nodes; see section 5) and
+excluded for safety. Anything `< 0.95` is a node whose hardware actually
+shrunk (small handful; not the bug we're auditing).
 
 ## 3. Compensation methodology
 
-For each (participant, node) preserved in the anchor epoch:
+For each (node, stuck epoch E):
 
-1. Read `anchor_pw` (the under-stored value).
-2. Walk forward up to 10 epochs and find the first epoch where the node
-   ran fresh PoC (`POC_SLOT == false`). Record `fresh_pw` and `fresh_epoch`.
-3. Track `preserved_epochs` = epochs (with absences allowed if the node
-   went temporarily missing) where the node was present and preserved.
-4. Compute the missing weight units:
-    - Observed delta = `fresh_pw - anchor_pw`, available only if observed
-      fresh follow-up exists.
-    - WSF estimate = `anchor_pw / WeightScaleFactor - anchor_pw`, always
-      available, used as fallback.
-5. For each preservation epoch `e`:
-    ```
-    lost_in_epoch = delta_pw * bitcoin_epoch_reward(e) / total_weight(e)
-    ```
-   `bitcoin_epoch_reward` follows the chain's decay
-   `initial * exp(decay_rate * (e - genesis_epoch))`, all from
-   `inference.params.bitcoin_reward_params`. `total_weight(e)` is the
-   observed sum of `weight` across all participants in that epoch's Qwen
-   subgroup.
-6. Sum across preserved epochs to get the total per node.
+```
+lost_share_E  = (1 - WSF) * pw_baseline / totalFullWeight(E)
+lost_ngonka_E = fixedEpochReward(E) * lost_share_E
+```
 
-Two columns reported per node:
+`fixedEpochReward(E)` is the chain's own
+`initial_epoch_reward * exp(decay_rate * (E - genesis_epoch))`, computed
+from `inference.params.bitcoin_reward_params` (initial = 323,000 GONKA,
+decay = -0.000475). At the affected epochs that's about 287,100 GONKA per
+epoch. `totalFullWeight(E)` is the observed sum of `weight` across all
+participants in the Qwen subgroup at epoch E.
 
-- `lost_reward_observed_gonka`: uses observed delta. Zero for indeterminate
-  nodes. This is the lower bound, computed entirely from on-chain numbers.
-- `lost_reward_estimated_gonka`: uses observed delta where available, falls
-  back to the WSF estimate for indeterminate cases. Best-effort total
-  including the indeterminate cohort.
+This formula is the linear approximation of the chain's reward formula
+(it ignores the small change in the denominator that fixing the stuck
+nodes would have caused, which is a second-order term well under 1% for
+all victims here).
 
-## 4. Restitution table - observed victims (12 nodes)
+It does NOT model:
 
-Sorted by `lost_reward_observed_gonka` desc. Full data in
-`output/issue2_per_node.csv`.
+- Inference settlement payouts (also dependent on consensus weight).
+- Collateral / power capping effects (none of the victims here are large
+enough to be capped, but the GRC may want to verify).
+- Slashing / downtime adjustments per epoch.
 
-| cohort | participant | node_id | anchor_pw | fresh_pw | fresh_epoch | ratio | lost (GONKA) |
-|---|---|---|---:|---:|---:|---:|---:|
-| preserved-in-247 | `gonka1lr9mj6dgkv0h76c8y8w0l3esztyg9v2q8d6d8d` | mnode-143 | 2409 | 6761 | 249 | 0.356 | **2,875.13** |
-| preserved-in-248-only | `gonka1hwvel7n3zuk6wruefuzc356l9myske9stckwnz` | fp001 | 2694 | 7627 | 249 | 0.353 | **1,650.94** |
-| preserved-in-248-only | `gonka12pcu9mcrpa4w4sjd9y3dsksnvu495ss6f9r4ra` | node1 | 2404 | 6819 | 249 | 0.353 | **1,477.58** |
-| preserved-in-248-only | `gonka1rcpc45n6zch9qlkn4m3cwngekad89xu8mcr09v` | node-1 | 2460 | 6813 | 249 | 0.361 | **1,456.83** |
-| preserved-in-247 | `gonka1dkl4mah5erqggvhqkpc8j3qs5tyuetgdy552cp` | node-235-1 | 1184 | 3122 | 252 | 0.379 | **1,280.33** |
-| preserved-in-248-only | `gonka1tlvg4kjx7ljd5thgd5fkgh39q6lu8cmxupktgg` | node1 | 1988 | 5799 | 249 | 0.343 | **1,275.44** |
-| preserved-in-248-only | `gonka17gpuntq09zsaqtmpe544gc32tk4424dwv5t34f` | U2b | 835 | 2612 | 249 | 0.320 | **594.71** |
-| preserved-in-248-only | `gonka1uf5cg7ef0ns6877nl27y0s6rt06cdmn40k5a88` | node1 | 894 | 2548 | 249 | 0.351 | **553.55** |
-| preserved-in-247 | `gonka1gyk0aahvr3qeju4zx0nplfreej6cy4jjk8svc5` | node1 | 425 | 1169 | 250 | 0.364 | **491.52** |
-| preserved-in-248-only | `gonka1ym3np7guxart483yfdxnlztuazx22cjt0e4a2p` | U5v1 | 732 | 2134 | 249 | 0.343 | **469.21** |
-| preserved-in-248-only | `gonka1x7zh2277spp7jfqjhv0g5mnezg290xdr4kpfnk` | node1 | 755 | 2132 | 249 | 0.354 | **460.85** |
-| preserved-in-247 | `gonka1fc9tzt83dgrqswlgay4668cuqjrk7zsqks2vm2` | node01s | 268 | 754 | 249 | 0.355 | **321.07** |
-| **TOTAL OBSERVED** | | | | | | | **12,907.19** |
+## 4. Restitution table
 
-By cohort:
+Sorted by `total_lost_gonka` desc. Full data in
+`output/issue2_per_node.csv` and `output/issue2_per_participant.csv`.
 
-- preserved-in-247: 4 nodes, 4,968.06 GONKA
-- preserved-in-248-only: 8 nodes, 7,939.13 GONKA
 
-## 5. Estimated restitution - indeterminate nodes (WSF-based)
+| participant                                    | node             | pw_base | stuck epochs | fixed in window? | lost (GONKA)      |
+| ---------------------------------------------- | ---------------- | ------- | ------------ | ---------------- | ----------------- |
+| `gonka1zsvl7ujlc8z3a35v2q6e3nml7ftyk23v76jqgl` | node-1           | 2760    | 249-253      | no               | **1,193.998351**  |
+| `gonka1jltjehxsnum94nt8c00ts7khmpy4lafv6gryzk` | U7               | 1720    | 249-252      | no               | **599.444071**    |
+| `gonka1r5hdy9q5v783ef7td98k4c68cxl6a58h5sytfq` | node2            | 6399    | 249          | no               | **569.630155**    |
+| `gonka1slndy4rsmld579628302rj5gz8z9qf4v6ppmc4` | host01           | 2166    | 249-251      | yes (e252)       | **555.439785**    |
+| `gonka187tn9y92ur6tu0zf69u94hwl0q77m47y0k36hv` | ice-1            | 2127    | 249-251      | yes (e252)       | **545.438792**    |
+| `gonka1pllyukkeymx3hfd9mts3pryr9y6efs9eshty87` | malay-an-3       | 2125    | 249-251      | yes (e252)       | **544.925921**    |
+| `gonka1u9a7r4w76gult5n9ysadnual9fghkc6yda60wj` | node1            | 1511    | 249-252      | no               | **526.604646**    |
+| `gonka14tqh62mangwzrma2lgg2dm375rcjzn2ydy8ttm` | 252-5            | 2004    | 249-251      | yes (e252)       | **513.897198**    |
+| `gonka1q5xt54wncgzk7dxv9x64uln68455g83wu9tugg` | x104             | 2805    | 249-250      | yes (e251)       | **483.159772**    |
+| `gonka1h3s37p0l23mg6ak9h9nmayh6r9f2vm6umj3qet` | node             | 2794    | 249-250      | no               | **481.265027**    |
+| `gonka16k03ze5ynkprsd4n6e5uzhthvu9jjk553rauqy` | node1            | 2685    | 249-250      | no               | **462.489835**    |
+| `gonka1zpw8tml8xl4fm6zm8zpf2u4pq4tehmd9e2vgq7` | rock             | 2604    | 249-250      | no               | **448.537628**    |
+| `gonka12pcu9mcrpa4w4sjd9y3dsksnvu495ss6f9r4ra` | node2            | 2403    | 249-250      | no               | **413.915484**    |
+| `gonka188c86f9mrlt4nlcg89f82nnfm9jzq9gtjafj50` | node5            | 3887    | 249          | yes (e250)       | **346.015379**    |
+| `gonka10mmdjau4dnj8krs7sh7t7635ttnmq9u3vqgz09` | node7            | 3108    | 249          | yes (e250)       | **276.669874**    |
+| `gonka1famtxh54kad6ylwtm60j6d7h6unpc08d4vdqnk` | I19              | 3006    | 249          | yes (e250)       | **267.589974**    |
+| `gonka1dpt9zx2dqcky6yjjwrd8xz2w7lq6vffy9mhvgs` | worker_gpu_alpha | 2549    | 249          | no               | **226.908465**    |
+| `gonka1lswsj2x7u4606wqpunmm07skgf76r3dyz4v0d8` | nv-compute-east  | 2529    | 249          | no               | **225.128092**    |
+| `gonka1ge9amk4ymld27d35akj3ky9uph4gyz6rdpepjj` | EdgeTPU-3        | 2452    | 249          | no               | **218.273658**    |
+| `gonka1llgg3kvg9sc6xz09jtkcrucrppxgn78xe4xlv0` | inference        | 2391    | 249          | no               | **212.843522**    |
+| `gonka145666cll76ptcyy9ceymtalr8gnvv73ne99p32` | inference-prod   | 2337    | 249          | no               | **208.036517**    |
+| `gonka1ccdm8j6sjyhq4qask049dwgaczs7f3pxte6zmp` | main             | 2126    | 249          | yes (e250)       | **189.253588**    |
+| `gonka1043d00lu0v3fz53cut34twtcanalqg9u8vehp2` | node1            | 2046    | 249          | no               | **182.132098**    |
+| `gonka1umvyh0rz5fdmk9qhxurshhchennajced6f4s89` | node-6           | 1933    | 249          | no               | **172.072994**    |
+| `gonka16q0zaetd6hq6d8zj48ur0v967xrrwh566kcazc` | ml-node-c087b09b | 1553    | 249          | no               | **138.245918**    |
+| `gonka1d694r00czmq75txghwjcuk07lxvc8d4ekgsha0` | mlnode-060       | 455     | 249-251      | no               | **116.678256**    |
+| `gonka168rtjfkszuhcggg4dfyse4yh7xn9zwfglnkns2` | mlnode-001       | 448     | 249-251      | no               | **114.883206**    |
+| `gonka1zktn8j65wlys8a8e38hqhf4y3x6m4x04zskkrx` | node_ovh         | 366     | 249-251      | yes (e252)       | **93.855476**     |
+| `gonka1p60lruhxmwcsa9taa28cp4k4f6kv2kvyu5h5ep` | inference-prod   | 1053    | 249          | no               | **93.736608**     |
+| `gonka1y2a9p56kv044327uycmqdexl7zs82fs5ryv5le` | node-235b        | 994     | 249          | yes (e250)       | **88.484509**     |
+| `gonka1d7p03cu2y2yt3vytq9wlfm6tlz0lfhlgv9h82p` | node1            | 627     | 249          | yes (e250)       | **55.814675**     |
+| `gonka1p2lhgng7tcqju7emk989s5fpdr7k2c3ek6h26m` | node2            | 627     | 249          | yes (e250)       | **55.814675**     |
+| `gonka1wthc28t25pg63hzvl07rl8e8r6km6hesl6jhsz` | rtx-test-1       | 452     | 249          | yes (e250)       | **40.236417**     |
+| `gonka17pw6099q758qwzewtrqmqpf5c2lrhr97fwqexu` | france-rtx-2     | 449     | 249          | yes (e250)       | **39.969361**     |
+|                                                |                  |         |              | **TOTAL**        | **10,701.389926** |
 
-These 18 nodes were preserved in epoch 247 or 248 but were not observed
-running fresh PoC again within our 10-epoch scan window, typically because
-the participant left the subgroup or the node stopped reporting. We can't
-directly observe what their true `pw` would have been.
 
-For these nodes we apply the same heuristic the chain itself validated for
-the 12 observed cases: `estimated_fresh_pw = anchor_pw / WeightScaleFactor`.
-That gives a best-effort restitution amount.
+Breakdown by stuck-window length:
 
-| cohort | participant | node_id | anchor_pw | est_fresh_pw | preserved_epochs | est (GONKA) |
-|---|---|---|---:|---:|---:|---:|
-| preserved-in-247 | `gonka12fazh3etpdx947ldwen4wudnds7wu4kjp5vd76` | GPU_WORKER_9 | 2426 | 6752 | 2 | 2,857.96 |
-| preserved-in-247 | `gonka17ef5hl0588tmjm9ypw7t2kge78wrkcpvyspc0p` | NODE_8455e990 | 2304 | 6412 | 2 | 2,713.94 |
-| preserved-in-247 | `gonka1fp8zl07qccdzuekns2q55jgmcag40kjrm8z0z9` | AXion | 2215 | 6165 | 2 | 2,609.55 |
-| preserved-in-247 | `gonka17tlh09e32xpv2uj433ytjnwwd8fh24jclpzm5s` | node1 | 1923 | 5352 | 2 | 2,265.36 |
-| preserved-in-247 | `gonka1cckj93kp9kegry64scpn4ew9965g3qrswyshl9` | node1 | 1792 | 4987 | 2 | 2,110.77 |
-| preserved-in-247 | `gonka17fcahf38xh8ghzyyrc55tarz9nd0vw6xd29nsk` | node1 | 1699 | 4729 | 2 | 2,001.76 |
-| preserved-in-247 | `gonka1gyydhl9lp0udz3409ps0c0lk0y4ft8qcyv8tfq` | node1 | 1680 | 4676 | 2 | 1,979.30 |
-| preserved-in-247 | `gonka1psgzz288a434dv6863ldd73xma70zw7387muj2` | node1 | 1640 | 4564 | 2 | 1,931.73 |
-| preserved-in-247 | `gonka1ql9asemklpkpr2d4mh33xw5gj0g5tm0v98c5q3` | node1 | 1640 | 4564 | 2 | 1,931.73 |
-| preserved-in-248-only | `gonka1uzk2scggfzghr9a5j92l00gzw4jx4adc66977y` | f211 | 3082 | 8578 | 1 | 1,839.37 |
-| preserved-in-247 | `gonka1eazh84v0e60s9m7exxp3nsadcfgvnsthgypjvl` | mlnode-3dc3bb80 | 931 | 2591 | 2 | 1,096.67 |
-| preserved-in-248-only | `gonka1nkzdygk3g2p2usnueuqxyep3462350hgzxs86s` | node1 | 1670 | 4648 | 1 | 996.66 |
-| preserved-in-248-only | `gonka1usmu5mfu8vsafvsrsvdutl50vy8kumdhv0j2x9` | node1 | 1650 | 4592 | 1 | 984.61 |
-| preserved-in-248-only | `gonka1vcawx5jc2hahydd9sqw30hlxyd9ppupm9ez0yz` | node1 | 1620 | 4509 | 1 | 966.87 |
-| preserved-in-248-only | `gonka10snluhflqhmwl5xrpuy9ugevypxdjjsft370fq` | node1 | 1570 | 4370 | 1 | 937.09 |
-| preserved-in-248-only | `gonka1k6p754pyhxud2399knyccgjpjvdafj2u9xlgyf` | node1 | 984 | 2739 | 1 | 587.35 |
-| preserved-in-248-only | `gonka1l0qv64xdu3dk2zzm5vk97j0drcmkus95u50gqk` | node1 | 576 | 1603 | 1 | 343.71 |
-| preserved-in-248-only | `gonka10jjrlvkfkqupgudz0l603sq99y3wkt3urwjm0x` | node1 | 447 | 1244 | 1 | 266.73 |
-| **TOTAL ESTIMATED (indeterminate)** | | | | | | **29,390.57** |
+- 5 epochs (249-253, no fix observed): 1 node, 1,194 GONKA
+- 4 epochs: 2 nodes, 1,126 GONKA
+- 3 epochs: 6 nodes, 2,873 GONKA
+- 2 epochs: 6 nodes, 2,290 GONKA
+- 1 epoch (fixed at 250): 19 nodes, 3,219 GONKA
 
-By cohort:
+19 nodes self-resolved in epoch 250 because the v0.2.12 episode-scoped
+preservation (PR #1089) gave them a fresh PoC slot. The 15 that stayed
+stuck longer kept getting sampled into preservation; some were still
+stuck at epoch 253 when this audit was last run.
 
-- preserved-in-247 (10 nodes): 21,991.61 GONKA
-- preserved-in-248-only (8 nodes): 7,398.96 GONKA
+## 5. Borderline cases (excluded)
 
-## 6. Grand totals
+Eight (participant, node) pairs sit in the ambiguous 1.10-2.00 ratio band:
 
-| bucket | participants | nodes | GONKA |
-|---|---:|---:|---:|
-| Observed victims (hard evidence) | 12 | 12 | 12,907.19 |
-| Indeterminate (WSF estimate) | 18 | 18 | 29,390.57 |
-| **Total restitution candidates** | **30** | **30** | **42,297.76** |
 
-(Two participants appear in both buckets via different nodes, so the
-unique-address count is 30.)
+| participant                                    | node        | pw_base | first jump | ratio |
+| ---------------------------------------------- | ----------- | ------- | ---------- | ----- |
+| `gonka12av9up884t9lcsf70rs0l7jfmkmc8k9sxfuknt` | FT-23       | 3611    | e249, 4689 | 1.299 |
+| `gonka125n6kr5gvdup0lndfkps7t6rd6592panhrg3np` | node481     | 3102    | e249, 3848 | 1.240 |
+| `gonka1wthc28t25pg63hzvl07rl8e8r6km6hesl6jhsz` | ml-tango-01 | 2962    | e249, 4077 | 1.376 |
+| `gonka1zktn8j65wlys8a8e38hqhf4y3x6m4x04zskkrx` | nvh100_5    | 2406    | e253, 4334 | 1.801 |
+| `gonka1pllyukkeymx3hfd9mts3pryr9y6efs9eshty87` | malay-an-1  | 2216    | e253, 3428 | 1.547 |
+| `gonka1fkrsesmn2hdj30fhwyam6h4f2e77un36xalhvl` | malay-az-2  | 2061    | e249, 3043 | 1.476 |
+| `gonka1tlvg4kjx7ljd5thgd5fkgh39q6lu8cmxupktgg` | node1       | 1988    | e250, 2923 | 1.470 |
+| `gonka1tmk2tzdneht6smu34pkmqdvu7p34qavvmwtwq2` | node1       | 1540    | e249, 2964 | 1.925 |
 
-## 7. Upstream patch reference
 
-The change that retires this bug is `gonka-ai/gonka` PR #1089 - *Random
-selection of preserved MLNodes*, shipped as part of `release/v0.2.12`.
+These could be partial-PoC, hardware change, or driver downgrade rather
+than the migration bug. The ratio is too far from 1.0 to call them stuck
+and too far from 2.78 to call them properly re-PoC'd. The GRC may want to
+ask each operator before deciding. None of them appear in the totals
+above.
 
-Two pieces of PR #1089 jointly fix it:
+## 6. Upstream patch reference
 
-1. Episode-scoped preservation instead of epoch-long. After v0.2.12 every
-   PoC anchor materializes a fresh preserved snapshot, so a node that's
-   preserved for one episode runs PoC the next. This is why epoch 249
-   onwards has zero preserved nodes in our chain queries (everyone runs
-   fresh PoC).
-2. *"Reward weight collapses from the old 'preserved + measured' ..."*
-   (truncated in the public release notes). PR #1089 changes how
-   preserved-node weight is folded into the reward calculation, removing
-   the dependency on the under-stored carried-over `MLNodeInfo.PocWeight`.
+`gonka-ai/gonka` PR #1089 ("Random selection of preserved MLNodes",
+shipped in `release/v0.2.12`). Two pieces fix this:
 
-The v0.2.12 binary applied at block height 3,834,200, which is early in
-epoch 248. The first fully clean epoch (no preserved nodes carrying stale
-values) is epoch 249. No additional downstream patch was needed - the bug
-self-resolved as soon as every active host had run one fresh PoC under
-v0.2.12.
+1. Episode-scoped preservation, so every PoC anchor materializes a fresh
+  preserved snapshot. Nodes that stay sampled into preservation across
+   multiple anchors keep their stale `MLNodeInfo.PocWeight`; the 15 nodes
+   in the table that self-resolved at e250 are exactly the ones that
+   weren't sampled again.
+2. Reward weight calculation refactor in `bitcoin_rewards.go` that uses
+  `ConfirmationWeight` (now WSF-applied uniformly) as numerator with
+   capping against `vw.Weight`.
 
-## 8. Caveats
+The migration handler `clearLegacyPoCv2Data` did not rewrite existing
+`MLNodeInfo.PocWeight` values, which is the root cause of the stuck-pw
+condition. A targeted backfill (multiply every preserved-node `PocWeight`
+by `1/WSF` once at the v0.2.12 boundary) would have prevented this.
 
-What the report does claim:
+## 7. Caveats
 
-- The 12 observed-victim nodes had `MLNodeInfo.PocWeight` stored at exactly
-  0.319 to 0.379 of their post-fresh-PoC value. This is verifiable directly
-  against the chain.
-- That cluster is too tight (mean 0.353, std 0.014) to be anything other
-  than the Qwen `WeightScaleFactor` of 0.3593, i.e. the bug is real and
-  mechanistic.
-- The compensation amounts are computed using the chain's own published
-  `BitcoinRewardParams` and the chain's own observed `total_weight` per
-  epoch.
+What the report claims:
+
+- 34 (participant, node) pairs had `MLNodeInfo.PocWeight` stored at the
+pre-v0.2.12 scaled value across one or more post-upgrade epochs. This is
+verifiable directly against the chain by reading
+`epoch_group_data/{epoch}?model_id=Qwen/...` for each address and node.
+- For each such node, the consensus contribution at the affected epoch was
+`WSF * pw_stuck` instead of the intended `pw_stuck`. The 0.359 ratio of
+`confirmation_weight / weight` at those addresses confirms this directly.
+- The compensation amounts are the linear-approximation PoC reward delta,
+computed from the chain's own `BitcoinRewardParams` and the chain's own
+observed `total_weight` per epoch.
 
 What the report does NOT claim:
 
-- That the WSF heuristic is the ground truth for the 18 indeterminate
-  nodes. Their true `fresh_pw` could differ from the heuristic. The GRC
-  may want to cross-check with the operators of those nodes (do they have
-  their own PoC reports, did they leave the network?).
-- That this captures every Issue #2 victim. Nodes preserved in epochs
-  245 or 246 and not in 247 are excluded by construction (the GRC
-  anchored on 247). The same mechanism applied to them in principle.
-- That the per-epoch lost share is exact under all chain mechanics. The
-  script uses the linear approximation
-  `delta_pw * epoch_reward / total_weight`, which is the right first-order
-  term but doesn't model collateral capping, delegation, or other
-  chain-side adjustments. For a small per-node delta in a large total the
-  approximation is within a few percent. For the largest victim
-  (`mnode-143` at 2409 -> 6761) second-order corrections may matter.
-- That this is the only issue from the GRC's list. Item #1 (POC_SLOT=true
-  -> confirmation_weight=0) is a separate, chronic behavior going back to
-  at least epoch 200. It was the *intentional* old design of the
-  preservation mechanism (also retired by PR #1089) and is distinct from
-  the migration-specific Issue #2 covered here. Out of scope for this
-  report.
+- That this is the only damage. Inference settlement payouts also depend
+on consensus weight; a stuck node loses ~64% of its inference share for
+every stuck epoch as well. That delta is harder to back-compute from
+public data and is not included in `lost_gonka` here.
+- That the borderline cohort (section 5) is or isn't affected. They need
+per-operator review.
+- That this captures other migration issues. Item #1 from the GRC list
+(POC_SLOT=true => confirmation_weight=0) is a separate, chronic
+pre-v0.2.12 design covered by the same upstream PR but not by this
+audit.
 
-## 9. Files in this folder
+## 8. Files in this folder
 
 ```
 scripts/epoch247_preserver_audit/
@@ -284,8 +273,9 @@ scripts/epoch247_preserver_audit/
 ├── README.md                          how to re-run
 ├── RESTITUTION_REPORT.md              this document
 └── output/
-    ├── issue2_per_node.csv            67 rows: per-(participant, node) restitution detail
-    ├── issue2_per_participant.csv     66 rows: aggregated per address
-    ├── issue2_summary.json            totals + ratio histogram
+    ├── issue2_per_node.csv            per-(participant, node) restitution
+    ├── issue2_per_participant.csv     aggregated per address
+    ├── issue2_summary.json            totals + cohort sizes
     └── issue2_log.txt                 full RPC trace
 ```
+
