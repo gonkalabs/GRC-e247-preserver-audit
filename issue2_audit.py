@@ -26,19 +26,18 @@ Detection (Cohort B):
   We compensate every stuck epoch up to (but excluding) the first fix epoch, or
   the last observed epoch if the node is never fixed in the scan window.
 
-Compensation per (node, stuck epoch E):
-    lost_share_E   = (1 - WSF) * pw_stuck / totalFullWeight(E)
+Compensation per (node, stuck epoch E), under the GRC "broad restitution"
+policy:
+    lost_share_E   = (1 - WSF) * pw_stuck / totalConfirmationWeight(E)
     lost_ngonka_E  = fixed_epoch_reward(E) * lost_share_E
 
-  Rationale: the chain's bitcoin reward formula uses
-    participantWeight     = ConfirmationWeight   (= WSF * sum(pw))
-    totalFullWeight       = sum_over_participants(sum(pw))
-    reward                = participantWeight * fixedEpochReward / totalFullWeight
+  Rationale: observed participant payouts in the affected epochs reconcile
+  against sum(confirmation_weight), not sum(weight). For example, in epoch 249:
+    1003 / 742426 * 287106 ~= 388 GNK
   In the "fair" world the node's pw would have been pw_stuck/WSF (raw), so its
   consensus contribution would have been pw_stuck (= WSF * pw_stuck/WSF). The
   per-epoch shortfall in the numerator is therefore (pw_stuck - WSF*pw_stuck)
-  = (1-WSF) * pw_stuck. We use the actual totalFullWeight as denominator (the
-  small change from "fixing" the stuck node is a second-order correction).
+  = (1-WSF) * pw_stuck.
 
 Outputs (./output/):
   - issue2_per_node.csv         : one row per (participant, node) flagged as stuck
@@ -48,7 +47,7 @@ Outputs (./output/):
 
 Usage:
   python3 issue2_audit.py
-  python3 issue2_audit.py --baseline-epoch 248 --post-window 248..253
+  python3 issue2_audit.py --baseline-epoch 248 --post-start 249 --post-end 253
   python3 issue2_audit.py --max-stuck-ratio 1.10 --min-fix-ratio 2.0
 """
 
@@ -183,6 +182,10 @@ class NodeRow:
     fix_epoch: int | None            # first epoch where pw jumped >= MIN_FIX_RATIO
     pw_at_fix: int | None
     expected_pw_under_v0_2_12: int   # = pw_baseline / WSF, what raw value SHOULD have been
+    denominator_mode: str
+    epoch_total_confirmation_weights: str
+    epoch_rewards_gonka: str
+    lost_by_epoch_gonka: str
     lost_ngonka: int
     lost_gonka: str
     notes: str
@@ -215,10 +218,10 @@ def index_epoch(rpc: str, epoch: int, model_id: str, cache: dict) -> dict | None
     return grp
 
 
-def epoch_total_weight(grp: dict | None) -> int:
+def epoch_total_confirmation_weight(grp: dict | None) -> int:
     if not grp:
         return 0
-    return sum(int(vw.get("weight") or 0) for vw in (grp.get("validation_weights") or []))
+    return sum(int(vw.get("confirmation_weight") or 0) for vw in (grp.get("validation_weights") or []))
 
 
 def collect_pw(grp: dict | None) -> dict[tuple[str, str], int]:
@@ -313,14 +316,20 @@ def audit(args) -> None:
         epoch_reward = compute_epoch_reward_ngonka
         lost = 0
         notes_parts: list[str] = []
+        epoch_denominators: list[str] = []
+        epoch_rewards: list[str] = []
+        lost_by_epoch: list[str] = []
         for e in stuck_epochs:
-            tw = epoch_total_weight(cache.get(e))
-            if tw <= 0:
-                notes_parts.append(f"e{e}:no_total_weight")
+            tcw = epoch_total_confirmation_weight(cache.get(e))
+            if tcw <= 0:
+                notes_parts.append(f"e{e}:no_total_confirmation_weight")
                 continue
             er = epoch_reward(params, e)
-            lost_e = int((Decimal(pw_base) * (Decimal(1) - wsf) * Decimal(er) / Decimal(tw)).to_integral_value())
+            lost_e = int((Decimal(pw_base) * (Decimal(1) - wsf) * Decimal(er) / Decimal(tcw)).to_integral_value())
             lost += lost_e
+            epoch_denominators.append(f"{e}:{tcw}")
+            epoch_rewards.append(f"{e}:{(Decimal(er) / Decimal(10) ** 9).quantize(Decimal('0.000001'))}")
+            lost_by_epoch.append(f"{e}:{(Decimal(lost_e) / Decimal(10) ** 9).quantize(Decimal('0.000001'))}")
 
         if fix_epoch is None:
             notes_parts.append("not_fixed_within_scan_window")
@@ -341,6 +350,10 @@ def audit(args) -> None:
             fix_epoch=fix_epoch,
             pw_at_fix=pw_at_fix,
             expected_pw_under_v0_2_12=expected_raw,
+            denominator_mode="raw_total_confirmation_weight",
+            epoch_total_confirmation_weights=";".join(epoch_denominators),
+            epoch_rewards_gonka=";".join(epoch_rewards),
+            lost_by_epoch_gonka=";".join(lost_by_epoch),
             lost_ngonka=lost,
             lost_gonka=str((Decimal(lost) / Decimal(10) ** 9).quantize(Decimal("0.000001"))),
             notes=";".join(notes_parts) if notes_parts else "",
@@ -390,6 +403,8 @@ def audit(args) -> None:
         "weight_scale_factor": str(wsf),
         "max_stuck_ratio": args.max_stuck_ratio,
         "min_fix_ratio": args.min_fix_ratio,
+        "denominator_mode": "raw_total_confirmation_weight",
+        "restitution_policy": "broad_include_misses_and_invalidations",
         "baseline_cohort_size": len(baseline_pw),
         "stuck_node_count": len(node_rows),
         "stuck_address_count": len(participant_rows),
@@ -427,6 +442,8 @@ def audit(args) -> None:
     print(f"baseline epoch   = {args.baseline_epoch}  (last pre-upgrade snapshot)")
     print(f"post-upgrade win = [{args.post_start}..{args.post_end}]")
     print(f"WSF (Qwen)       = {wsf}")
+    print("denominator      = raw total confirmation_weight")
+    print("policy           = broad; include affected nodes even with misses/invalidation")
     print()
     print(f"{'address':<46}  {'#nodes':>6}  {'stuck_eps':>9}  {'fixed?':>7}  {'lost_GONKA':>14}")
     for r in pr_sorted:

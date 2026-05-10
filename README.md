@@ -23,8 +23,24 @@ python3 issue2_audit.py
 Takes around 30 seconds (HTTP round-trips against the public node). Outputs
 land in `./output/`.
 
-Bottom line: **34 affected MLNodes** across 34 unique addresses, totaling
-**10,701.39 GONKA** in restitution for the PoC fixed reward only.
+Current result: **34 affected MLNodes** across 34 unique addresses, totaling
+**29,635.04 GONKA** in restitution for the PoC fixed reward only, using
+the GRC-approved broad policy (include affected nodes even with misses or
+invalidation).
+
+## What changed in this version
+
+This version fixes the compensation amount after GRC review.
+
+- The first pass used `sum(weight)` as the denominator. That made the
+  amounts too small.
+- Observed payouts match `sum(confirmation_weight)`, so the script now uses
+  raw `sum(confirmation_weight)` per epoch.
+- The GRC chose the broad policy: if a node had the stuck-pw bug, it stays
+  in the set even if the participant had misses, invalidation, or zero
+  actual payout.
+- The CSV now includes the denominator and per-epoch loss inputs so the
+  numbers can be checked without reading the code.
 
 ## What the script does
 
@@ -43,13 +59,15 @@ Qwen subgroup it indexes every (participant, node) pair and reads its
 For each (node, stuck epoch E) the per-epoch loss is:
 
 ```
-lost_share_E  = (1 - WSF) * pw_baseline / totalFullWeight(E)
+lost_share_E  = (1 - WSF) * pw_baseline / totalConfirmationWeight(E)
 lost_ngonka_E = fixedEpochReward(E) * lost_share_E
 ```
 
 `fixedEpochReward(E)` is the chain's own `initial * exp(decay_rate * (E - genesis))`
-read from `inference.params.bitcoin_reward_params`. `totalFullWeight(E)` is
-the observed sum of `weight` across the Qwen subgroup at epoch E.
+read from `inference.params.bitcoin_reward_params`. The denominator is the
+observed raw `sum(confirmation_weight)` across the Qwen subgroup at epoch E.
+This matches operator-observed payouts, e.g. epoch 249:
+`1003 / 742426 * 287106 ~= 388 GNK`.
 
 Per-participant totals are aggregated. CSVs and a summary JSON go to
 `./output/`.
