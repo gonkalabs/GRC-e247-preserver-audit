@@ -28,16 +28,18 @@ Detection (Cohort B):
 
 Compensation per (node, stuck epoch E), under the GRC "broad restitution"
 policy:
-    lost_share_E   = (1 - WSF) * pw_stuck / totalConfirmationWeight(E)
+    lost_share_E   = (pw_stuck - floor(WSF * pw_stuck)) / rootTotalWeight(E)
     lost_ngonka_E  = fixed_epoch_reward(E) * lost_share_E
 
-  Rationale: observed participant payouts in the affected epochs reconcile
-  against sum(confirmation_weight), not sum(weight). For example, in epoch 249:
-    1003 / 742426 * 287106 ~= 388 GNK
+  Rationale: the chain distributes fixed epoch rewards using the parent
+  EpochGroupData.total_weight (the aggregate/root group, where model_id == ""),
+  not the per-model subgroup's sum(confirmation_weight). For example, in
+  epoch 249:
+    675 / 740094 * 287106 ~= 261.854 GNK
   In the "fair" world the node's pw would have been pw_stuck/WSF (raw), so its
   consensus contribution would have been pw_stuck (= WSF * pw_stuck/WSF). The
-  per-epoch shortfall in the numerator is therefore (pw_stuck - WSF*pw_stuck)
-  = (1-WSF) * pw_stuck.
+  per-epoch shortfall in the root-weight numerator is therefore:
+    pw_stuck - floor(WSF * pw_stuck)
 
 Outputs (./output/):
   - issue2_per_node.csv         : one row per (participant, node) flagged as stuck
@@ -144,9 +146,11 @@ def fetch_inference_params(rpc: str) -> dict:
     return http_get(f"{rpc}/chain-api/productscience/inference/inference/params").get("params", {}) or {}
 
 
-def fetch_epoch_group(rpc: str, epoch: int, model_id: str) -> dict | None:
-    enc = urllib.parse.quote(model_id, safe="")
-    url = f"{rpc}/chain-api/productscience/inference/inference/epoch_group_data/{epoch}?model_id={enc}"
+def fetch_epoch_group(rpc: str, epoch: int, model_id: str | None = None) -> dict | None:
+    url = f"{rpc}/chain-api/productscience/inference/inference/epoch_group_data/{epoch}"
+    if model_id:
+        enc = urllib.parse.quote(model_id, safe="")
+        url = f"{url}?model_id={enc}"
     body = http_get(url)
     return (body.get("epoch_group_data") if body else None) or None
 
@@ -183,7 +187,7 @@ class NodeRow:
     pw_at_fix: int | None
     expected_pw_under_v0_2_12: int   # = pw_baseline / WSF, what raw value SHOULD have been
     denominator_mode: str
-    epoch_total_confirmation_weights: str
+    epoch_total_confirmation_weights: str  # legacy CSV column name; stores root_total_weight values
     epoch_rewards_gonka: str
     lost_by_epoch_gonka: str
     lost_ngonka: int
@@ -222,6 +226,19 @@ def epoch_total_confirmation_weight(grp: dict | None) -> int:
     if not grp:
         return 0
     return sum(int(vw.get("confirmation_weight") or 0) for vw in (grp.get("validation_weights") or []))
+
+
+def epoch_root_total_weight(grp: dict | None) -> int:
+    """Return parent EpochGroupData.total_weight, falling back to sum(weight)."""
+    if not grp:
+        return 0
+    try:
+        total = int(grp.get("total_weight") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total > 0:
+        return total
+    return sum(int(vw.get("weight") or 0) for vw in (grp.get("validation_weights") or []))
 
 
 def collect_pw(grp: dict | None) -> dict[tuple[str, str], int]:
@@ -265,10 +282,14 @@ def audit(args) -> None:
         sys.exit(2)
 
     cache: dict[int, dict] = {}
+    root_cache: dict[int, dict] = {}
     epochs_needed = list(range(args.baseline_epoch, args.post_end + 1))
-    log(f"Pre-fetching epochs {epochs_needed}")
+    log(f"Pre-fetching model epochs {epochs_needed}")
     for e in epochs_needed:
         index_epoch(args.rpc, e, args.model, cache)
+    log(f"Pre-fetching aggregate/root epochs {list(range(args.post_start, args.post_end + 1))}")
+    for e in range(args.post_start, args.post_end + 1):
+        root_cache[e] = fetch_epoch_group(args.rpc, e)
 
     baseline_grp = cache.get(args.baseline_epoch)
     if not baseline_grp:
@@ -320,14 +341,15 @@ def audit(args) -> None:
         epoch_rewards: list[str] = []
         lost_by_epoch: list[str] = []
         for e in stuck_epochs:
-            tcw = epoch_total_confirmation_weight(cache.get(e))
-            if tcw <= 0:
-                notes_parts.append(f"e{e}:no_total_confirmation_weight")
+            root_total_weight = epoch_root_total_weight(root_cache.get(e))
+            if root_total_weight <= 0:
+                notes_parts.append(f"e{e}:no_root_total_weight")
                 continue
             er = epoch_reward(params, e)
-            lost_e = int((Decimal(pw_base) * (Decimal(1) - wsf) * Decimal(er) / Decimal(tcw)).to_integral_value())
+            lost_root_weight = pw_base - int(Decimal(pw_base) * wsf)
+            lost_e = int((Decimal(lost_root_weight) * Decimal(er) / Decimal(root_total_weight)).to_integral_value())
             lost += lost_e
-            epoch_denominators.append(f"{e}:{tcw}")
+            epoch_denominators.append(f"{e}:{root_total_weight}")
             epoch_rewards.append(f"{e}:{(Decimal(er) / Decimal(10) ** 9).quantize(Decimal('0.000001'))}")
             lost_by_epoch.append(f"{e}:{(Decimal(lost_e) / Decimal(10) ** 9).quantize(Decimal('0.000001'))}")
 
@@ -350,7 +372,7 @@ def audit(args) -> None:
             fix_epoch=fix_epoch,
             pw_at_fix=pw_at_fix,
             expected_pw_under_v0_2_12=expected_raw,
-            denominator_mode="raw_total_confirmation_weight",
+            denominator_mode="root_total_weight",
             epoch_total_confirmation_weights=";".join(epoch_denominators),
             epoch_rewards_gonka=";".join(epoch_rewards),
             lost_by_epoch_gonka=";".join(lost_by_epoch),
@@ -403,7 +425,7 @@ def audit(args) -> None:
         "weight_scale_factor": str(wsf),
         "max_stuck_ratio": args.max_stuck_ratio,
         "min_fix_ratio": args.min_fix_ratio,
-        "denominator_mode": "raw_total_confirmation_weight",
+        "denominator_mode": "root_total_weight",
         "restitution_policy": "broad_include_misses_and_invalidations",
         "baseline_cohort_size": len(baseline_pw),
         "stuck_node_count": len(node_rows),
@@ -442,7 +464,7 @@ def audit(args) -> None:
     print(f"baseline epoch   = {args.baseline_epoch}  (last pre-upgrade snapshot)")
     print(f"post-upgrade win = [{args.post_start}..{args.post_end}]")
     print(f"WSF (Qwen)       = {wsf}")
-    print("denominator      = raw total confirmation_weight")
+    print("denominator      = root_total_weight (parent EpochGroupData.total_weight)")
     print("policy           = broad; include affected nodes even with misses/invalidation")
     print()
     print(f"{'address':<46}  {'#nodes':>6}  {'stuck_eps':>9}  {'fixed?':>7}  {'lost_GONKA':>14}")

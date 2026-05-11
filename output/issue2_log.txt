@@ -1,20 +1,21 @@
-[22:22:46] RPC                = http://node2.gonka.ai:8000
-[22:22:46] baseline_epoch     = 248  (last pre-upgrade snapshot)
-[22:22:46] post_window        = [249..253]
-[22:22:46] max_stuck_ratio    = 1.1
-[22:22:46] min_fix_ratio      = 2.0
-[22:22:46] model              = Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
-[22:22:48] WeightScaleFactor  = 0.3593
-[22:22:48] Pre-fetching epochs [248, 249, 250, 251, 252, 253]
-[22:22:50]   fetched epoch 248 (95 participants)
-[22:22:51]   fetched epoch 249 (69 participants)
-[22:22:54]   fetched epoch 250 (70 participants)
-[22:22:58]   fetched epoch 251 (57 participants)
-[22:22:59]   fetched epoch 252 (72 participants)
-[22:23:01]   fetched epoch 253 (56 participants)
-[22:23:01] Baseline cohort (every node seen at epoch 248): 353 (participant, node) pairs
-[22:23:01] Cohort B (stuck pw across upgrade): 34 nodes across 34 addresses
-[22:23:01] Summary: {
+[12:04:57] RPC                = http://node2.gonka.ai:8000
+[12:04:57] baseline_epoch     = 248  (last pre-upgrade snapshot)
+[12:04:57] post_window        = [249..253]
+[12:04:57] max_stuck_ratio    = 1.1
+[12:04:57] min_fix_ratio      = 2.0
+[12:04:57] model              = Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+[12:04:59] WeightScaleFactor  = 0.3593
+[12:04:59] Pre-fetching model epochs [248, 249, 250, 251, 252, 253]
+[12:05:00]   fetched epoch 248 (95 participants)
+[12:05:02]   fetched epoch 249 (69 participants)
+[12:05:09]   fetched epoch 250 (70 participants)
+[12:05:11]   fetched epoch 251 (57 participants)
+[12:05:13]   fetched epoch 252 (72 participants)
+[12:05:17]   fetched epoch 253 (56 participants)
+[12:05:17] Pre-fetching aggregate/root epochs [249, 250, 251, 252, 253]
+[12:05:31] Baseline cohort (every node seen at epoch 248): 353 (participant, node) pairs
+[12:05:31] Cohort B (stuck pw across upgrade): 34 nodes across 34 addresses
+[12:05:31] Summary: {
   "baseline_epoch": 248,
   "post_window": [
     249,
@@ -24,19 +25,19 @@
   "weight_scale_factor": "0.3593",
   "max_stuck_ratio": 1.1,
   "min_fix_ratio": 2.0,
-  "denominator_mode": "raw_total_confirmation_weight",
+  "denominator_mode": "root_total_weight",
   "restitution_policy": "broad_include_misses_and_invalidations",
   "baseline_cohort_size": 353,
   "stuck_node_count": 34,
   "stuck_address_count": 34,
   "stuck_nodes_fixed_in_window": 15,
   "stuck_nodes_unfixed_in_window": 19,
-  "grand_total_lost_ngonka": 29635042632584,
-  "grand_total_lost_gonka": "29635.042633"
+  "grand_total_lost_ngonka": 30318495191486,
+  "grand_total_lost_gonka": "30318.495191"
 }
-[22:23:01] 
+[12:05:31] 
 Wrote:
-[22:23:01]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_per_node.csv  (34 rows)
-[22:23:01]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_per_participant.csv  (34 rows)
-[22:23:01]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_summary.json
-[22:23:01]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_log.txt
+[12:05:31]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_per_node.csv  (34 rows)
+[12:05:31]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_per_participant.csv  (34 rows)
+[12:05:31]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_summary.json
+[12:05:31]   /Users/mike/Desktop/gonka-explorer/scripts/epoch247_preserver_audit/output/issue2_log.txt

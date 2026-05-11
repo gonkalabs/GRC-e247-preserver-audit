@@ -8,13 +8,13 @@
   "weight_scale_factor": "0.3593",
   "max_stuck_ratio": 1.1,
   "min_fix_ratio": 2.0,
-  "denominator_mode": "raw_total_confirmation_weight",
+  "denominator_mode": "root_total_weight",
   "restitution_policy": "broad_include_misses_and_invalidations",
   "baseline_cohort_size": 353,
   "stuck_node_count": 34,
   "stuck_address_count": 34,
   "stuck_nodes_fixed_in_window": 15,
   "stuck_nodes_unfixed_in_window": 19,
-  "grand_total_lost_ngonka": 29635042632584,
-  "grand_total_lost_gonka": "29635.042633"
+  "grand_total_lost_ngonka": 30318495191486,
+  "grand_total_lost_gonka": "30318.495191"
 }
